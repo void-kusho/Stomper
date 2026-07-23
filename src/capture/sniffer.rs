@@ -62,8 +62,8 @@ impl Sniffer {
                         let parsed = parser::parse_packet(
                             packet.data,
                             link_type,
-                            ts.tv_sec,
-                            ts.tv_usec,
+                            ts.tv_sec.into(),
+                            ts.tv_usec.into(),
                         );
 
                         match parsed {
