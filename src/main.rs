@@ -1,9 +1,12 @@
 mod capture;
+mod detection;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 use capture::{start_capture, CaptureConfig, ParsedPacket, Sniffer, TransportHeader};
+
+use crate::detection::DetectorState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -50,6 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut count = 0u64;
     let start = SystemTime::now();
 
+    let mut detector = DetectorState::default();
+
     loop {
         tokio::select! {
             packet = rx.recv() => {
@@ -57,6 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(pkt) => {
                         count += 1;
                         print_packet(count, &pkt);
+                        for activity in detector.log_packet(pkt) {
+                            println!("Activity detected: {activity:?}");
+                        }
                     }
                     None => {
                         eprintln!("Capture channel closed unexpectedly");
