@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(pkt) => {
                         count += 1;
                         print_packet(count, &pkt);
-                        for activity in detector.log_packet(pkt) {
+                        for activity in detector.log_packet(&pkt) {
                             println!("Activity detected: {activity:?}");
                         }
                     }
