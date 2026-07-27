@@ -25,7 +25,7 @@ pub struct SynFloodState {
 impl SynFloodState {
     pub fn log_packet(&mut self, packet: &ParsedPacket) -> Option<Activity> {
         // Remove outdated packets from history.
-        let now = SystemTime::now();
+        let now = packet.timestamp;
         self.history.retain(|_, timestamps| {
             timestamps.retain(|ts| *ts + SYN_FLOOD_INTERVAL >= now);
             !timestamps.is_empty()

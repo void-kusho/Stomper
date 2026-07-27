@@ -27,7 +27,7 @@ pub struct SingleSourceScanState {
 impl SingleSourceScanState {
     pub fn log_packet(&mut self, packet: &ParsedPacket) -> Option<Activity> {
         // Remove outdated packets from history
-        let now = SystemTime::now();
+        let now = packet.timestamp;
         self.history.retain(|_, inner| {
             inner.retain(|_, ts| *ts + MAX_SCAN_INTERVAL >= now);
             !inner.is_empty()
