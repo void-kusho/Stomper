@@ -52,3 +52,144 @@ impl SynFloodState {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::{
+        Ipv4Header, ParsedPacket, TcpFlags, TcpHeader, TransportHeader, UdpHeader,
+    };
+    use std::net::Ipv4Addr;
+    use std::time::{Duration, SystemTime};
+
+    fn make_syn_packet(timestamp: SystemTime) -> ParsedPacket {
+        ParsedPacket {
+            timestamp,
+            ethernet: None,
+            ipv4: Some(Ipv4Header {
+                src_ip: Ipv4Addr::new(192, 168, 1, 100),
+                dst_ip: Ipv4Addr::new(192, 168, 1, 1),
+                protocol: 6,
+                ttl: 64,
+                total_length: 40,
+                identification: 0,
+                version: 4,
+                ihl: 5,
+                dscp: 0,
+                ecn: 0,
+                flags: 0,
+                fragment_offset: 0,
+            }),
+            ipv6: None,
+            transport: Some(TransportHeader::Tcp(TcpHeader {
+                src_port: 50000,
+                dst_port: 80,
+                sequence_number: 0,
+                acknowledgment_number: 0,
+                data_offset: 20,
+                flags: TcpFlags {
+                    syn: true,
+                    ack: false,
+                    ..Default::default()
+                },
+                window_size: 1024,
+                checksum: 0,
+                urgent_pointer: 0,
+            })),
+            raw_len: 54,
+        }
+    }
+
+    #[test]
+    fn test_syn_flood_below_threshold() {
+        let mut detector = SynFloodState::default();
+        let now = SystemTime::now();
+
+        for i in 0..(SYN_FLOOD_PACKET_COUNT_THRESHOLD - 1) {
+            let pkt = make_syn_packet(now + Duration::from_millis(i as u64));
+            assert!(detector.log_packet(&pkt).is_none());
+        }
+    }
+
+    #[test]
+    fn test_syn_flood_detected_at_threshold() {
+        let mut detector = SynFloodState::default();
+        let now = SystemTime::now();
+
+        for i in 0..SYN_FLOOD_PACKET_COUNT_THRESHOLD {
+            let pkt = make_syn_packet(now + Duration::from_millis(i as u64));
+
+            let result = detector.log_packet(&pkt);
+
+            if i == SYN_FLOOD_PACKET_COUNT_THRESHOLD - 1 {
+                assert!(matches!(result, Some(Activity::SynFlood { .. })));
+            } else {
+                assert!(result.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn test_syn_ack_not_detected() {
+        let mut detector = SynFloodState::default();
+
+        let mut pkt = make_syn_packet(SystemTime::now());
+
+        if let Some(TransportHeader::Tcp(ref mut tcp)) = pkt.transport {
+            tcp.flags.ack = true;
+        }
+
+        assert!(detector.log_packet(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_history_cleared_after_detection() {
+        let mut detector = SynFloodState::default();
+        let now = SystemTime::now();
+
+        let mut detected = None;
+
+        for i in 0..SYN_FLOOD_PACKET_COUNT_THRESHOLD {
+            let pkt = make_syn_packet(now + Duration::from_millis(i as u64));
+            detected = detector.log_packet(&pkt);
+        }
+
+        assert!(matches!(detected, Some(Activity::SynFlood { .. })));
+        assert!(detector.history.is_empty());
+    }
+
+    #[test]
+    fn test_old_packets_expire() {
+        let mut detector = SynFloodState::default();
+
+        let base = SystemTime::now();
+
+        // Insert packets below the threshold.
+        for i in 0..100 {
+            let pkt = make_syn_packet(base + Duration::from_millis(i as u64));
+            assert!(detector.log_packet(&pkt).is_none());
+        }
+
+        // Packet arrives after expiration interval.
+        let pkt = make_syn_packet(base + SYN_FLOOD_INTERVAL + Duration::from_millis(1));
+
+        // Previous packets should have expired.
+        assert!(detector.log_packet(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_udp_not_detected() {
+        let mut detector = SynFloodState::default();
+
+        let mut pkt = make_syn_packet(SystemTime::now());
+
+        pkt.transport = Some(TransportHeader::Udp(UdpHeader {
+            src_port: 50000,
+            dst_port: 80,
+            length: 8,
+            checksum: 0,
+        }));
+
+        assert!(detector.log_packet(&pkt).is_none());
+    }
+}
