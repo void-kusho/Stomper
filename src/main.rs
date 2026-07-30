@@ -39,14 +39,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         device.desc.as_deref().unwrap_or("no description")
     );
 
-    // Storage, counters, and the dashboard come up before capture so the first alert already has
+    // Storage, counters, and the API come up before capture so the first alert already has
     // somewhere to go.
     let store = AlertStore::open(db::DEFAULT_DATABASE_PATH).await?;
     let stats = Arc::new(Stats::new(&device.name, db::DEFAULT_DATABASE_PATH));
 
-    let (alert_tx, alert_task) = alert::spawn_manager(store.clone(), Arc::clone(&stats));
-    let api = api::serve(api::DEFAULT_BIND, store, Arc::clone(&stats)).await?;
-    println!("  Dashboard: http://{}", api.addr);
+    let api = api::serve(api::DEFAULT_BIND, store.clone(), Arc::clone(&stats)).await?;
+    println!("  API: http://{}/api/status", api.addr);
 
     let config = CaptureConfig {
         interface: device.name.clone(),
@@ -68,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let detection_task = tokio::spawn(run_detection(packet_rx, alert_tx));
+    let detection_task = tokio::spawn(run_detection(packet_rx, store, Arc::clone(&stats)));
 
     println!("  Press Ctrl-C to stop");
     println!();
@@ -78,11 +77,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("  Stopping...");
 
-    // Shut down in pipeline order so nothing already captured is thrown away: stop capture, let
-    // detection drain the packet queue, then let the alert manager finish its inserts.
+    // Shut down capture first, then drain remaining packets through detection.
     capture.shutdown().await;
     let _ = detection_task.await;
-    let _ = alert_task.await;
     api.stop();
 
     print_summary(&stats);
@@ -92,7 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Single detection task: keeps packet order for the stateful detectors and turns every detection
 /// into an alert. Ends when capture closes the queue.
-async fn run_detection(mut rx: mpsc::Receiver<ParsedPacket>, alerts: mpsc::Sender<Alert>) {
+async fn run_detection(
+    mut rx: mpsc::Receiver<ParsedPacket>,
+    store: AlertStore,
+    stats: Arc<Stats>,
+) {
     let mut detector = DetectorState::default();
     let mut count = 0u64;
 
@@ -101,14 +102,12 @@ async fn run_detection(mut rx: mpsc::Receiver<ParsedPacket>, alerts: mpsc::Sende
         print_packet(count, &packet);
 
         for activity in detector.log_packet(&packet) {
-            if alerts
-                .send(Alert::from_activity(&activity, packet.timestamp))
-                .await
-                .is_err()
-            {
-                eprintln!("Alert manager stopped; detection is shutting down");
-                return;
+            let alert = Alert::from_activity(&activity, packet.timestamp);
+            if let Err(e) = store.insert(&alert).await {
+                eprintln!("Failed to store alert: {e}");
             }
+            stats.record_alert();
+            println!("{alert}");
         }
     }
 }

@@ -1,27 +1,17 @@
-//! Alert manager.
+//! Alert data type and console formatting.
 //!
-//! Detector [`Activity`] values become [`Alert`] records here. The manager task owns one bounded
-//! channel: it consumes alerts, persists them through [`AlertStore`], prints them to the console,
-//! and bumps the shared counters. Alert volume is much lower than packet volume, so a single task
-//! is enough and keeps insert order equal to detection order.
+//! Detection [`Activity`] values become [`Alert`] records here. The alert is then stored by
+//! the caller and printed to the console.
 
 use std::fmt;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
-use crate::db::AlertStore;
 use crate::detection::Activity;
-use crate::stats::Stats;
 
-/// Capacity of the bounded channel between the detection task and the alert manager.
-const ALERT_QUEUE_CAPACITY: usize = 64;
-
-/// Timestamp layout shared by the console alert and the dashboard table.
+/// Timestamp layout for console output.
 pub(crate) const ALERT_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
 /// Console/database name of a port scan alert.
@@ -138,28 +128,6 @@ impl fmt::Display for Alert {
     }
 }
 
-/// Spawns the alert manager and returns the sender the detection task writes to. The task drains
-/// its queue and exits once every sender is dropped, so a clean shutdown is "stop capture, drop the
-/// sender, then await this handle".
-pub fn spawn_manager(
-    store: AlertStore,
-    stats: Arc<Stats>,
-) -> (mpsc::Sender<Alert>, JoinHandle<()>) {
-    let (tx, rx) = mpsc::channel(ALERT_QUEUE_CAPACITY);
-    (tx, tokio::spawn(run(store, stats, rx)))
-}
-
-async fn run(store: AlertStore, stats: Arc<Stats>, mut rx: mpsc::Receiver<Alert>) {
-    while let Some(alert) = rx.recv().await {
-        // A storage failure must not silence the console alert, so report and keep going.
-        if let Err(e) = store.insert(&alert).await {
-            eprintln!("Failed to store alert: {e}");
-        }
-        stats.record_alert();
-        println!("{alert}");
-    }
-}
-
 fn join<T: fmt::Display>(items: &[T]) -> String {
     items
         .iter()
@@ -257,32 +225,6 @@ mod tests {
         assert!(rendered.contains("Source:      192.168.1.50"));
         assert!(rendered.contains("Destination: -"));
         assert!(rendered.contains("Severity:    Medium"));
-    }
-
-    /// Detection -> channel -> manager -> SQLite, the path `main` wires up.
-    #[tokio::test]
-    async fn manager_stores_every_queued_alert_then_exits() {
-        let store = AlertStore::in_memory().await.expect("open store");
-        let stats = Arc::new(Stats::new("eth0", "memory"));
-
-        let (tx, task) = spawn_manager(store.clone(), Arc::clone(&stats));
-
-        for activity in [scan_activity(), flood_activity()] {
-            tx.send(Alert::from_activity(&activity, observed_at()))
-                .await
-                .expect("queue alert");
-        }
-
-        // Dropping the last sender is what tells the manager to drain and stop.
-        drop(tx);
-        task.await.expect("manager task");
-
-        let stored = store.recent(10).await.expect("query");
-        assert_eq!(stored.len(), 2);
-        assert_eq!(stored[0].category, CATEGORY_SYN_FLOOD);
-        assert_eq!(stored[1].category, CATEGORY_PORT_SCAN);
-        assert!(stored.iter().all(|alert| alert.id.is_some()));
-        assert_eq!(stats.snapshot().alerts_generated, 2);
     }
 
     #[test]
