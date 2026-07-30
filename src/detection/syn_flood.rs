@@ -62,6 +62,13 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::time::{Duration, SystemTime};
 
+    /// Common fixed timestamp for all tests.
+    const TEST_TIME_OFFSET: Duration = Duration::from_secs(1000);
+
+    fn test_time() -> SystemTime {
+        SystemTime::UNIX_EPOCH + TEST_TIME_OFFSET
+    }
+
     fn make_syn_packet(timestamp: SystemTime) -> ParsedPacket {
         ParsedPacket {
             timestamp,
@@ -103,7 +110,7 @@ mod tests {
     #[test]
     fn test_syn_flood_below_threshold() {
         let mut detector = SynFloodState::default();
-        let now = SystemTime::now();
+        let now = test_time();
 
         for i in 0..(SYN_FLOOD_PACKET_COUNT_THRESHOLD - 1) {
             let pkt = make_syn_packet(now + Duration::from_millis(i as u64));
@@ -114,7 +121,7 @@ mod tests {
     #[test]
     fn test_syn_flood_detected_at_threshold() {
         let mut detector = SynFloodState::default();
-        let now = SystemTime::now();
+        let now = test_time();
 
         for i in 0..SYN_FLOOD_PACKET_COUNT_THRESHOLD {
             let pkt = make_syn_packet(now + Duration::from_millis(i as u64));
@@ -133,7 +140,7 @@ mod tests {
     fn test_syn_ack_not_detected() {
         let mut detector = SynFloodState::default();
 
-        let mut pkt = make_syn_packet(SystemTime::now());
+        let mut pkt = make_syn_packet(test_time());
 
         if let Some(TransportHeader::Tcp(ref mut tcp)) = pkt.transport {
             tcp.flags.ack = true;
@@ -145,7 +152,7 @@ mod tests {
     #[test]
     fn test_history_cleared_after_detection() {
         let mut detector = SynFloodState::default();
-        let now = SystemTime::now();
+        let now = test_time();
 
         let mut detected = None;
 
@@ -162,18 +169,27 @@ mod tests {
     fn test_old_packets_expire() {
         let mut detector = SynFloodState::default();
 
-        let base = SystemTime::now();
+        let base = test_time();
 
-        // Insert packets below the threshold.
-        for i in 0..100 {
-            let pkt = make_syn_packet(base + Duration::from_millis(i as u64));
+        let packet_count = (SYN_FLOOD_PACKET_COUNT_THRESHOLD * 3) / 4;
+
+        // First batch of packets.
+        for _ in 0..packet_count {
+            let pkt = make_syn_packet(base);
             assert!(detector.log_packet(&pkt).is_none());
         }
 
-        // Packet arrives after expiration interval.
-        let pkt = make_syn_packet(base + SYN_FLOOD_INTERVAL + Duration::from_millis(1));
+        // Advance beyond the expiration interval.
+        let later = base + SYN_FLOOD_INTERVAL + Duration::from_millis(1);
 
-        // Previous packets should have expired.
+        // Second batch should not combine with the expired first batch.
+        for _ in 0..packet_count {
+            let pkt = make_syn_packet(later);
+            assert!(detector.log_packet(&pkt).is_none());
+        }
+
+        // One more packet still should not trigger detection.
+        let pkt = make_syn_packet(later);
         assert!(detector.log_packet(&pkt).is_none());
     }
 
@@ -181,7 +197,7 @@ mod tests {
     fn test_udp_not_detected() {
         let mut detector = SynFloodState::default();
 
-        let mut pkt = make_syn_packet(SystemTime::now());
+        let mut pkt = make_syn_packet(test_time());
 
         pkt.transport = Some(TransportHeader::Udp(UdpHeader {
             src_port: 50000,
