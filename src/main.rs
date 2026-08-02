@@ -89,6 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Single detection task: keeps packet order for the stateful detectors and turns every detection
 /// into an alert. Ends when capture closes the queue.
+///
+/// The alert pipeline is: packet -> `DetectorState` -> `Activity` -> `Alert` -> SQLite + console.
+/// Because detection is stateful (scan/flood windows), this task must process packets in order,
+/// so it is the only consumer of the queue. Capture is a separate task feeding this one, which
+/// decouples packet loss (a full queue drops the newest packet) from detection latency.
 async fn run_detection(
     mut rx: mpsc::Receiver<ParsedPacket>,
     store: AlertStore,
@@ -101,12 +106,20 @@ async fn run_detection(
         count += 1;
         print_packet(count, &packet);
 
+        // A single packet can trigger more than one detector (e.g. a SYN is also a port-scan
+        // probe), so each packet may produce zero, one, or several activities.
         for activity in detector.log_packet(&packet) {
             let alert = Alert::from_activity(&activity, packet.timestamp);
+            // The insert is awaited inline: with only one writer it keeps ordering simple, at
+            // the cost of stalling packet processing while the alert is persisted. Alerts are
+            // also written exactly as emitted - there is no dedup/coalescing, so a long scan
+            // can generate a large number of near-identical rows.
             if let Err(e) = store.insert(&alert).await {
                 eprintln!("Failed to store alert: {e}");
             }
             stats.record_alert();
+            // Console output is the operator's real-time view; the API serves the same data
+            // from the database for dashboards.
             println!("{alert}");
         }
     }

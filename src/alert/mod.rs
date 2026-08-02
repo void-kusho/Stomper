@@ -73,9 +73,16 @@ pub struct Alert {
 
 impl Alert {
     /// Builds an alert from a detection, timestamped with the packet that triggered it.
+    ///
+    /// This is the only place an `Activity` becomes an `Alert`: it fixes the category and
+    /// severity for each detection type and packs the evidence into a single `details` string.
+    /// The mapping is intentionally static (no thresholds here) - the detectors decide what
+    /// counts as an attack, this type only formats the outcome for storage and display.
     pub fn from_activity(activity: &Activity, observed_at: SystemTime) -> Self {
         let timestamp = DateTime::<Utc>::from(observed_at);
         match activity {
+            // A scan is one source reaching many destinations, so the source is attributed
+            // and the destination is left empty (too many to list).
             Activity::SingleSourceScan {
                 src,
                 destinations,
@@ -92,6 +99,8 @@ impl Alert {
                     join(ports)
                 ),
             },
+            // A flood targets one destination from (often spoofed) sources, so the destination
+            // is attributed and the sources are listed as evidence only, not blame.
             Activity::SynFlood {
                 dst,
                 syn_count,

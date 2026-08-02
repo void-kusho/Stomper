@@ -72,6 +72,10 @@ impl AlertStore {
     }
 
     /// Stores one alert and returns its new row id.
+    ///
+    /// The severity and timestamp are stored as their string forms (e.g. "High",
+    /// RFC 3339) so the schema stays readable and forward-compatible; parsing happens on
+    /// read in [`row_to_alert`], where an unknown value becomes a [`DbError::InvalidRow`].
     pub async fn insert(&self, alert: &Alert) -> Result<i64, DbError> {
         let result = sqlx::query(
             "INSERT INTO alerts (timestamp, category, severity, source, destination, details)
