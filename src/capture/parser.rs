@@ -1,16 +1,16 @@
 #![expect(dead_code)]
 
+use pcap::Linktype;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use pcap::Linktype;
 
-use pnet_packet::ethernet::{EthernetPacket, EtherTypes};
+use pnet_packet::Packet;
+use pnet_packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet_packet::icmp::IcmpPacket;
 use pnet_packet::ipv4::Ipv4Packet;
 use pnet_packet::ipv6::Ipv6Packet;
 use pnet_packet::tcp::TcpPacket;
 use pnet_packet::udp::UdpPacket;
-use pnet_packet::Packet;
 
 use super::CaptureError;
 
@@ -394,14 +394,14 @@ mod tests {
     #[test]
     fn test_parse_ipv4_header() {
         let data = [
-            0x45,            // version=4, ihl=5
-            0x00,            // dscp=0, ecn=0
-            0x00, 0x34,      // total_length=52
-            0x12, 0x34,      // identification=0x1234
-            0x40, 0x00,      // flags=DF, fragment_offset=0
-            0x40,            // ttl=64
-            0x06,            // protocol=TCP
-            0x00, 0x00,      // checksum
+            0x45, // version=4, ihl=5
+            0x00, // dscp=0, ecn=0
+            0x00, 0x34, // total_length=52
+            0x12, 0x34, // identification=0x1234
+            0x40, 0x00, // flags=DF, fragment_offset=0
+            0x40, // ttl=64
+            0x06, // protocol=TCP
+            0x00, 0x00, // checksum
             0xC0, 0xA8, 0x01, 0x01, // src=192.168.1.1
             0xC0, 0xA8, 0x01, 0x02, // dst=192.168.1.2
         ];
@@ -429,10 +429,9 @@ mod tests {
     #[test]
     fn test_parse_ipv4_invalid_ihl() {
         let data = [
-            0x47,            // version=4, ihl=7 (28 bytes), data only 20 bytes
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00,
+            0x47, // version=4, ihl=7 (28 bytes), data only 20 bytes
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
         let eth = EthernetHeader {
             dst_mac: [0; 6],
