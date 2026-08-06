@@ -1,12 +1,12 @@
 use std::{
     collections::HashMap,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     time::{Duration, SystemTime},
 };
 
 use crate::{
     capture::{ParsedPacket, TransportHeader},
-    detection::{Activity, src_dst_ip},
+    detection::{Activity, evidence_sample, src_dst_ip},
 };
 
 /// Time interval within which a large number of SYNs is considered an attack.
@@ -14,21 +14,27 @@ pub const SYN_FLOOD_INTERVAL: Duration = Duration::from_secs(1);
 /// Amount of SYNs considered a large number for the time interval.
 pub const SYN_FLOOD_PACKET_COUNT_THRESHOLD: usize = 256;
 
+/// One observed bare SYN, kept only long enough to age out of [`SYN_FLOOD_INTERVAL`].
+struct SynRecord {
+    at: SystemTime,
+    src: IpAddr,
+}
+
 #[derive(Default)]
 pub struct SynFloodState {
     /// Maps destinations to SYN occurrences, tagged with a timestamp. Detecting a SYN flood is just
     /// watching for more than [`SYN_FLOOD_PACKET_COUNT_THRESHOLD`] packets within a time period of
     /// [`SYN_FLOOD_INTERVAL`].
-    history: HashMap<SocketAddr, Vec<SystemTime>>,
+    history: HashMap<SocketAddr, Vec<SynRecord>>,
 }
 
 impl SynFloodState {
     pub fn log_packet(&mut self, packet: &ParsedPacket) -> Option<Activity> {
         // Remove outdated packets from history.
         let now = packet.timestamp;
-        self.history.retain(|_, timestamps| {
-            timestamps.retain(|ts| *ts + SYN_FLOOD_INTERVAL >= now);
-            !timestamps.is_empty()
+        self.history.retain(|_, records| {
+            records.retain(|record| record.at + SYN_FLOOD_INTERVAL >= now);
+            !records.is_empty()
         });
 
         let tcp = match packet.transport.as_ref()? {
@@ -40,15 +46,25 @@ impl SynFloodState {
             return None;
         }
 
-        let (_, dst_ip) = src_dst_ip(packet)?;
+        let (src_ip, dst_ip) = src_dst_ip(packet)?;
         let dst = SocketAddr::new(dst_ip, tcp.dst_port);
         let entry = self.history.entry(dst).or_default();
-        entry.push(packet.timestamp);
+        entry.push(SynRecord {
+            at: packet.timestamp,
+            src: src_ip,
+        });
 
         // Run detection rule. Clear history on detection so we don't flood with flood detections.
-        (entry.len() >= SYN_FLOOD_PACKET_COUNT_THRESHOLD).then(|| {
-            self.history.remove(&dst);
-            Activity::SynFlood { dst }
+        if entry.len() < SYN_FLOOD_PACKET_COUNT_THRESHOLD {
+            return None;
+        }
+        let syn_count = entry.len();
+        let sources = evidence_sample(entry.iter().map(|record| record.src));
+        self.history.remove(&dst);
+        Some(Activity::SynFlood {
+            dst,
+            syn_count,
+            sources,
         })
     }
 }
@@ -56,55 +72,23 @@ impl SynFloodState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capture::{
-        Ipv4Header, ParsedPacket, TcpFlags, TcpHeader, TransportHeader, UdpHeader,
-    };
+    use crate::capture::{ParsedPacket, TcpFlags, TransportHeader, UdpHeader};
+    use crate::detection::test_support::{tcp_packet, test_time};
     use std::net::Ipv4Addr;
     use std::time::{Duration, SystemTime};
 
-    /// Common fixed timestamp for all tests.
-    const TEST_TIME_OFFSET: Duration = Duration::from_secs(1000);
-
-    fn test_time() -> SystemTime {
-        SystemTime::UNIX_EPOCH + TEST_TIME_OFFSET
-    }
-
     fn make_syn_packet(timestamp: SystemTime) -> ParsedPacket {
-        ParsedPacket {
+        tcp_packet(
             timestamp,
-            ethernet: None,
-            ipv4: Some(Ipv4Header {
-                src_ip: Ipv4Addr::new(192, 168, 1, 100),
-                dst_ip: Ipv4Addr::new(192, 168, 1, 1),
-                protocol: 6,
-                ttl: 64,
-                total_length: 40,
-                identification: 0,
-                version: 4,
-                ihl: 5,
-                dscp: 0,
-                ecn: 0,
-                flags: 0,
-                fragment_offset: 0,
-            }),
-            ipv6: None,
-            transport: Some(TransportHeader::Tcp(TcpHeader {
-                src_port: 50000,
-                dst_port: 80,
-                sequence_number: 0,
-                acknowledgment_number: 0,
-                data_offset: 20,
-                flags: TcpFlags {
-                    syn: true,
-                    ack: false,
-                    ..Default::default()
-                },
-                window_size: 1024,
-                checksum: 0,
-                urgent_pointer: 0,
-            })),
-            raw_len: 54,
-        }
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(192, 168, 1, 1),
+            80,
+            TcpFlags {
+                syn: true,
+                ack: false,
+                ..Default::default()
+            },
+        )
     }
 
     #[test]
