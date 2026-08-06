@@ -1,6 +1,6 @@
 const number = new Intl.NumberFormat();
 const rows = document.querySelector("#alert-rows");
-const status = document.querySelector("#status");
+const statusEl = document.querySelector("#status");
 const refreshButton = document.querySelector("#refresh");
 
 function formatBytes(bytes) {
@@ -26,20 +26,22 @@ function formatDuration(seconds) {
 }
 
 function renderStatistics(stats) {
-  document.querySelector("#packets").textContent = number.format(stats.packets_captured);
-  document.querySelector("#bytes").textContent = formatBytes(stats.bytes_captured);
-  document.querySelector("#alerts").textContent = number.format(stats.alerts_detected);
+  const traffic = stats.traffic;
+  document.querySelector("#packets").textContent = number.format(traffic.packets_captured);
+  document.querySelector("#bytes").textContent = formatBytes(traffic.bytes_captured);
+  document.querySelector("#alerts").textContent = number.format(traffic.alerts_generated);
   document.querySelector("#protocols").textContent =
-    `TCP ${number.format(stats.tcp_packets)} / UDP ${number.format(stats.udp_packets)} / ` +
-    `ICMP ${number.format(stats.icmp_packets)} / Other ${number.format(stats.other_packets)}`;
+    `${number.format(traffic.packets_per_second)} pkt/s · ` +
+    `${number.format(traffic.packets_dropped_queue_full)} dropped · ` +
+    `${number.format(traffic.parse_errors)} parse errors`;
 }
 
 function renderRuntime(runtime) {
   const captureStatus = document.querySelector("#capture-status");
-  captureStatus.textContent = runtime.capture_active ? "Capturing" : "Standby";
-  captureStatus.dataset.active = runtime.capture_active;
+  captureStatus.textContent = runtime.healthy ? "Running" : "Stopped";
+  captureStatus.dataset.active = runtime.healthy;
   document.querySelector("#interface").textContent = runtime.interface || "No interface";
-  const startedAt = new Date(runtime.started_at_ms).valueOf();
+  const startedAt = Date.parse(runtime.started_at);
   document.querySelector("#uptime").textContent = Number.isNaN(startedAt)
     ? "--"
     : formatDuration((Date.now() - startedAt) / 1000);
@@ -73,7 +75,7 @@ function renderAlerts(alerts) {
     const row = document.createElement("tr");
     const severityCell = document.createElement("td");
     const severity = document.createElement("span");
-    const occurredAt = new Date(alert.occurred_at_ms);
+    const occurredAt = new Date(alert.timestamp);
 
     severity.className = "severity";
     severity.dataset.level = alert.severity.toLowerCase();
@@ -82,9 +84,9 @@ function renderAlerts(alerts) {
 
     appendCell(row, Number.isNaN(occurredAt.valueOf()) ? "Unknown" : occurredAt.toLocaleString());
     row.append(severityCell);
-    appendCell(row, alert.attack_type);
-    appendCell(row, alert.source_ip);
-    appendCell(row, alert.destination_ip);
+    appendCell(row, alert.category);
+    appendCell(row, alert.source);
+    appendCell(row, alert.destination);
     appendCell(row, alert.details);
     rows.append(row);
   }
@@ -102,12 +104,12 @@ async function getJson(url) {
 async function refresh() {
   if (refreshButton.disabled) return;
   refreshButton.disabled = true;
-  status.textContent = "Refreshing...";
-  status.dataset.state = "";
+  statusEl.textContent = "Refreshing...";
+  statusEl.dataset.state = "";
 
   const [statistics, alerts, runtime] = await Promise.allSettled([
-    getJson("/api/statistics"),
-    getJson("/api/alerts/recent?limit=20"),
+    getJson("/api/stats"),
+    getJson("/api/alerts?limit=20"),
     getJson("/api/status")
   ]);
   const unavailable = [];
@@ -132,11 +134,11 @@ async function refresh() {
   }
 
   if (unavailable.length) {
-    status.textContent = `${unavailable.join(", ")} unavailable`;
-    status.dataset.state = "error";
+    statusEl.textContent = `${unavailable.join(", ")} unavailable`;
+    statusEl.dataset.state = "error";
   } else {
-    status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
-    status.dataset.state = "ok";
+    statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    statusEl.dataset.state = "ok";
   }
 
   refreshButton.disabled = false;

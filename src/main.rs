@@ -23,33 +23,6 @@ const PACKET_QUEUE_CAPACITY: usize = 256;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let database_url =
-        env::var("STOMPER_DATABASE_URL").unwrap_or_else(|_| "sqlite://stomper.db".to_owned());
-    let database_options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
-    let pool = SqlitePool::connect_with(database_options).await?;
-
-    let statistics = api::shared_statistics();
-    let status = api::shared_status();
-    let dashboard_port = env::var("STOMPER_PORT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(3000);
-    let web_state = api::ApiState::new(pool.clone(), statistics.clone(), status.clone());
-    let web_server = tokio::spawn(async move {
-        if let Err(error) = api::serve(dashboard_port, web_state).await {
-            eprintln!("Dashboard server stopped: {error}");
-        }
-    });
-
-    println!(" Dashboard: http://127.0.0.1:{dashboard_port}/");
-
-    let devices = match env::var("STOMPER_INTERFACE") {
-        Ok(interface) if !interface.trim().is_empty() => {
-            vec![pcap::Device::from(interface.as_str())]
-        }
-        _ => Sniffer::list_interfaces()?,
-    };
-    if devices.is_empty() {
     let devices = Sniffer::list_interfaces()?;
     let Some(device) = devices
         .iter()
@@ -57,7 +30,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or(devices.first())
     else {
         eprintln!("No network interfaces found");
-        web_server.abort();
         return Ok(());
     };
 
@@ -91,18 +63,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "  Hint: run with 'sudo' or set 'sudo setcap cap_net_raw+ep target/debug/stomper'"
                 );
             }
-            web_server.abort();
             return Ok(());
         }
     };
 
-    {
-        let mut current_status = status.write().await;
-        current_status.interface = Some(device.name.clone());
-        current_status.capture_active = true;
-    }
-
-    println!("  Duration: 30 seconds");
     let detection_task = tokio::spawn(run_detection(packet_rx, store, Arc::clone(&stats)));
 
     println!("  Press Ctrl-C to stop");
@@ -130,34 +94,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Because detection is stateful (scan/flood windows), this task must process packets in order,
 /// so it is the only consumer of the queue. Capture is a separate task feeding this one, which
 /// decouples packet loss (a full queue drops the newest packet) from detection latency.
-async fn run_detection(
-    mut rx: mpsc::Receiver<ParsedPacket>,
-    store: AlertStore,
-    stats: Arc<Stats>,
-) {
+async fn run_detection(mut rx: mpsc::Receiver<ParsedPacket>, store: AlertStore, stats: Arc<Stats>) {
     let mut detector = DetectorState::default();
     let mut count = 0u64;
 
-    loop {
-        tokio::select! {
-            packet = rx.recv() => {
-                match packet {
-                    Some(pkt) => {
-                        count += 1;
-                        statistics.write().await.observe_packet(&pkt);
-                        print_packet(count, &pkt);
-                        for activity in detector.log_packet(&pkt) {
-                            println!("Activity detected: {activity:?}");
-                        }
-                    }
-                    None => {
-                        eprintln!("Capture channel closed unexpectedly");
-                        break;
-                    }
-                }
-            }
-            _ = &mut timeout => {
-                break;
     while let Some(packet) = rx.recv().await {
         count += 1;
         print_packet(count, &packet);
@@ -181,15 +121,6 @@ async fn run_detection(
     }
 }
 
-    handle.abort();
-    {
-        let mut current_status = status.write().await;
-        current_status.capture_active = false;
-    }
-    web_server.abort();
-
-    let elapsed = start.elapsed().unwrap_or(Duration::from_secs(30));
-    let rate = count as f64 / elapsed.as_secs_f64();
 fn print_summary(stats: &Stats) {
     let snapshot = stats.snapshot();
     println!();
