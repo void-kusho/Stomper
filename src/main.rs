@@ -329,3 +329,88 @@ fn icmp_desc(typ: u8, code: u8) -> String {
     };
     name.to_string()
 }
+
+/// End-to-end activity detection. We load in a file that contains activity matching all of our
+/// detection criteria and assert that it triggers each detector.
+#[cfg(test)]
+mod replay_tests {
+    use crate::{
+        capture::parser,
+        detection::{
+            Activity, DetectorState, port_scan::SCAN_PACKET_COUNT_THRESHOLD,
+            syn_flood::SYN_FLOOD_PACKET_COUNT_THRESHOLD,
+        },
+    };
+    use pcap::{Capture, Offline};
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    /// Generate a list of detected activity from a replayed capture.
+    fn replay(mut cap: Capture<Offline>) -> Vec<Activity> {
+        let link_type = cap.get_datalink();
+        let mut detector = DetectorState::default();
+        let mut activity = Vec::new();
+
+        loop {
+            match cap.next_packet() {
+                Ok(packet) => {
+                    let ts = packet.header.ts;
+                    let parsed = parser::parse_packet(
+                        packet.data,
+                        link_type,
+                        ts.tv_sec.into(),
+                        ts.tv_usec.into(),
+                    )
+                    .expect("failed to parse packet");
+                    activity.extend(detector.log_packet(&parsed));
+                }
+                Err(pcap::Error::NoMorePackets) => break,
+                Err(e) => panic!("unexpected pcap error: {e}"),
+            }
+        }
+        activity
+    }
+
+    /// Load in a test capture replay and run it against our detector. It should find one SYN flood
+    /// detection and one port scan. If detection criteria change, the test file may fail to trigger
+    /// activity detection and need to be regenerated.
+    #[test]
+    fn replay_test() {
+        let cap = Capture::from_file("test.pcap").expect("couldn't open capture");
+        let activity = replay(cap);
+
+        assert_eq!(
+            activity.len(),
+            2,
+            "expected exactly one scan and one flood detection, got {activity:?}"
+        );
+
+        let scan = activity
+            .iter()
+            .find(|a| matches!(a, Activity::SingleSourceScan { .. }))
+            .expect("port scan was not detected");
+        match scan {
+            Activity::SingleSourceScan {
+                src, destinations, ..
+            } => {
+                assert_eq!(*src, Ipv4Addr::new(203, 0, 113, 50));
+                assert_eq!(*destinations, SCAN_PACKET_COUNT_THRESHOLD);
+            }
+            _ => unreachable!(),
+        }
+
+        let flood = activity
+            .iter()
+            .find(|a| matches!(a, Activity::SynFlood { .. }))
+            .expect("SYN flood was not detected");
+        match flood {
+            Activity::SynFlood { dst, syn_count, .. } => {
+                assert_eq!(
+                    *dst,
+                    SocketAddr::new(Ipv4Addr::new(192, 168, 1, 20).into(), 80)
+                );
+                assert_eq!(*syn_count, SYN_FLOOD_PACKET_COUNT_THRESHOLD);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
