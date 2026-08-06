@@ -1,5 +1,5 @@
-mod port_scan;
-mod syn_flood;
+pub(crate) mod port_scan;
+pub(crate) mod syn_flood;
 
 use port_scan::SingleSourceScanState;
 use syn_flood::SynFloodState;
