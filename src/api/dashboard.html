@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Stomper IDS | Network monitor</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script src="/dashboard.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="page-header">
+      <div>
+        <h1>Network monitor</h1>
+        <p class="subtitle">Live traffic and security alerts.</p>
+      </div>
+      <button id="refresh" type="button">Refresh</button>
+    </header>
+
+    <section class="runtime-panel" aria-label="Capture status">
+      <div class="runtime-item">
+        <span class="label">Capture</span>
+        <strong id="capture-status" class="runtime-value">Connecting...</strong>
+      </div>
+      <div class="runtime-item">
+        <span class="label">Interface</span>
+        <strong id="interface" class="runtime-value interface-value">--</strong>
+      </div>
+      <div class="runtime-item">
+        <span class="label">Uptime</span>
+        <strong id="uptime" class="runtime-value">--</strong>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="summary-heading">
+      <div class="panel-header">
+        <h2 id="summary-heading">Traffic summary</h2>
+        <span id="status" class="status" role="status" aria-live="polite">Loading...</span>
+      </div>
+      <div class="stats">
+        <article class="stat">
+          <span class="label">Packets captured</span>
+          <strong id="packets">--</strong>
+          <div id="protocols" class="breakdown">TCP -- / UDP -- / ICMP -- / Other --</div>
+        </article>
+        <article class="stat">
+          <span class="label">Traffic volume</span>
+          <strong id="bytes">--</strong>
+          <div class="breakdown">Observed packet bytes</div>
+        </article>
+        <article class="stat">
+          <span class="label">Alerts detected</span>
+          <strong id="alerts">--</strong>
+          <div class="breakdown">Alerts in this session</div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel alerts-panel" aria-labelledby="alerts-heading">
+      <div class="panel-header">
+        <h2 id="alerts-heading">Recent alerts</h2>
+      </div>
+      <div class="table-wrap">
+        <table aria-labelledby="alerts-heading">
+          <thead>
+            <tr>
+              <th scope="col">Time</th>
+              <th scope="col">Severity</th>
+              <th scope="col">Type</th>
+              <th scope="col">Source</th>
+              <th scope="col">Destination</th>
+              <th scope="col">Details</th>
+            </tr>
+          </thead>
+          <tbody id="alert-rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

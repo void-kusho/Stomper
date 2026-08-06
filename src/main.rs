@@ -1,18 +1,47 @@
+mod api;
 mod capture;
 mod detection;
 
+use std::{env, str::FromStr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 use capture::{start_capture, CaptureConfig, ParsedPacket, Sniffer, TransportHeader};
+use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 
 use crate::detection::DetectorState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let devices = Sniffer::list_interfaces()?;
+    let database_url =
+        env::var("STOMPER_DATABASE_URL").unwrap_or_else(|_| "sqlite://stomper.db".to_owned());
+    let database_options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
+    let pool = SqlitePool::connect_with(database_options).await?;
+
+    let statistics = api::shared_statistics();
+    let status = api::shared_status();
+    let dashboard_port = env::var("STOMPER_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(3000);
+    let web_state = api::ApiState::new(pool.clone(), statistics.clone(), status.clone());
+    let web_server = tokio::spawn(async move {
+        if let Err(error) = api::serve(dashboard_port, web_state).await {
+            eprintln!("Dashboard server stopped: {error}");
+        }
+    });
+
+    println!(" Dashboard: http://127.0.0.1:{dashboard_port}/");
+
+    let devices = match env::var("STOMPER_INTERFACE") {
+        Ok(interface) if !interface.trim().is_empty() => {
+            vec![pcap::Device::from(interface.as_str())]
+        }
+        _ => Sniffer::list_interfaces()?,
+    };
     if devices.is_empty() {
         eprintln!("No network interfaces found");
+        web_server.abort();
         return Ok(());
     }
 
@@ -39,9 +68,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if msg.contains("CAP_NET_RAW") {
                 eprintln!("  Hint: run with 'sudo' or set 'sudo setcap cap_net_raw+ep target/debug/stomper'");
             }
+            web_server.abort();
             return Ok(());
         }
     };
+
+    {
+        let mut current_status = status.write().await;
+        current_status.interface = Some(device.name.clone());
+        current_status.capture_active = true;
+    }
 
     println!("  Duration: 30 seconds");
     println!();
@@ -61,6 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match packet {
                     Some(pkt) => {
                         count += 1;
+                        statistics.write().await.observe_packet(&pkt);
                         print_packet(count, &pkt);
                         for activity in detector.log_packet(&pkt) {
                             println!("Activity detected: {activity:?}");
@@ -79,6 +116,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     handle.abort();
+    {
+        let mut current_status = status.write().await;
+        current_status.capture_active = false;
+    }
+    web_server.abort();
 
     let elapsed = start.elapsed().unwrap_or(Duration::from_secs(30));
     let rate = count as f64 / elapsed.as_secs_f64();
