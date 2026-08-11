@@ -9,31 +9,37 @@ use crate::{
     detection::{Activity, evidence_sample, src_dst_ip},
 };
 
-/// Time interval within which a large number of SYNs is considered an attack.
-pub const SYN_FLOOD_INTERVAL: Duration = Duration::from_secs(1);
-/// Amount of SYNs considered a large number for the time interval.
-pub const SYN_FLOOD_PACKET_COUNT_THRESHOLD: usize = 256;
-
-/// One observed bare SYN, kept only long enough to age out of [`SYN_FLOOD_INTERVAL`].
+/// One observed bare SYN, kept only long enough to age out of `SynFloodState::syn_flood_interval`.
 struct SynRecord {
     at: SystemTime,
     src: IpAddr,
 }
 
-#[derive(Default)]
 pub struct SynFloodState {
+    /// Time interval within which a large number of SYNs is considered an attack.
+    syn_flood_interval: Duration,
+    /// Amount of SYNs considered a large number for the time interval.
+    syn_flood_packet_count_threshold: usize,
     /// Maps destinations to SYN occurrences, tagged with a timestamp. Detecting a SYN flood is just
-    /// watching for more than [`SYN_FLOOD_PACKET_COUNT_THRESHOLD`] packets within a time period of
-    /// [`SYN_FLOOD_INTERVAL`].
+    /// watching for more than `syn_flood_packet_count_threshold` packets within a time period of
+    /// `syn_flood_interval`.
     history: HashMap<SocketAddr, Vec<SynRecord>>,
 }
 
 impl SynFloodState {
+    pub fn new(syn_flood_interval: Duration, syn_flood_packet_count_threshold: usize) -> Self {
+        Self {
+            syn_flood_interval,
+            syn_flood_packet_count_threshold,
+            history: HashMap::new(),
+        }
+    }
+
     pub fn log_packet(&mut self, packet: &ParsedPacket) -> Option<Activity> {
         // Remove outdated packets from history.
         let now = packet.timestamp;
         self.history.retain(|_, records| {
-            records.retain(|record| record.at + SYN_FLOOD_INTERVAL >= now);
+            records.retain(|record| record.at + self.syn_flood_interval >= now);
             !records.is_empty()
         });
 
@@ -55,7 +61,7 @@ impl SynFloodState {
         });
 
         // Run detection rule. Clear history on detection so we don't flood with flood detections.
-        if entry.len() < SYN_FLOOD_PACKET_COUNT_THRESHOLD {
+        if entry.len() < self.syn_flood_packet_count_threshold {
             return None;
         }
         let syn_count = entry.len();
@@ -77,6 +83,18 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::time::{Duration, SystemTime};
 
+    // These tests exercise the detection rule itself, so the exact threshold values don't matter
+    // as long as they're used consistently below.
+    const TEST_SYN_FLOOD_INTERVAL: Duration = Duration::from_secs(1);
+    const TEST_SYN_FLOOD_PACKET_COUNT_THRESHOLD: usize = 256;
+
+    fn test_state() -> SynFloodState {
+        SynFloodState::new(
+            TEST_SYN_FLOOD_INTERVAL,
+            TEST_SYN_FLOOD_PACKET_COUNT_THRESHOLD,
+        )
+    }
+
     fn make_syn_packet(timestamp: SystemTime) -> ParsedPacket {
         tcp_packet(
             timestamp,
@@ -93,10 +111,10 @@ mod tests {
 
     #[test]
     fn test_syn_flood_below_threshold() {
-        let mut detector = SynFloodState::default();
+        let mut detector = test_state();
         let now = test_time();
 
-        for i in 0..(SYN_FLOOD_PACKET_COUNT_THRESHOLD - 1) {
+        for i in 0..(TEST_SYN_FLOOD_PACKET_COUNT_THRESHOLD - 1) {
             let pkt = make_syn_packet(now + Duration::from_millis(i as u64));
             assert!(detector.log_packet(&pkt).is_none());
         }
@@ -104,15 +122,15 @@ mod tests {
 
     #[test]
     fn test_syn_flood_detected_at_threshold() {
-        let mut detector = SynFloodState::default();
+        let mut detector = test_state();
         let now = test_time();
 
-        for i in 0..SYN_FLOOD_PACKET_COUNT_THRESHOLD {
+        for i in 0..TEST_SYN_FLOOD_PACKET_COUNT_THRESHOLD {
             let pkt = make_syn_packet(now + Duration::from_millis(i as u64));
 
             let result = detector.log_packet(&pkt);
 
-            if i == SYN_FLOOD_PACKET_COUNT_THRESHOLD - 1 {
+            if i == TEST_SYN_FLOOD_PACKET_COUNT_THRESHOLD - 1 {
                 assert!(matches!(result, Some(Activity::SynFlood { .. })));
             } else {
                 assert!(result.is_none());
@@ -122,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_syn_ack_not_detected() {
-        let mut detector = SynFloodState::default();
+        let mut detector = test_state();
 
         let mut pkt = make_syn_packet(test_time());
 
@@ -135,12 +153,12 @@ mod tests {
 
     #[test]
     fn test_history_cleared_after_detection() {
-        let mut detector = SynFloodState::default();
+        let mut detector = test_state();
         let now = test_time();
 
         let mut detected = None;
 
-        for i in 0..SYN_FLOOD_PACKET_COUNT_THRESHOLD {
+        for i in 0..TEST_SYN_FLOOD_PACKET_COUNT_THRESHOLD {
             let pkt = make_syn_packet(now + Duration::from_millis(i as u64));
             detected = detector.log_packet(&pkt);
         }
@@ -151,11 +169,11 @@ mod tests {
 
     #[test]
     fn test_old_packets_expire() {
-        let mut detector = SynFloodState::default();
+        let mut detector = test_state();
 
         let base = test_time();
 
-        let packet_count = (SYN_FLOOD_PACKET_COUNT_THRESHOLD * 3) / 4;
+        let packet_count = (TEST_SYN_FLOOD_PACKET_COUNT_THRESHOLD * 3) / 4;
 
         // First batch of packets.
         for _ in 0..packet_count {
@@ -164,7 +182,7 @@ mod tests {
         }
 
         // Advance beyond the expiration interval.
-        let later = base + SYN_FLOOD_INTERVAL + Duration::from_millis(1);
+        let later = base + TEST_SYN_FLOOD_INTERVAL + Duration::from_millis(1);
 
         // Second batch should not combine with the expired first batch.
         for _ in 0..packet_count {
@@ -179,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_udp_not_detected() {
-        let mut detector = SynFloodState::default();
+        let mut detector = test_state();
 
         let mut pkt = make_syn_packet(test_time());
 

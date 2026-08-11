@@ -6,23 +6,60 @@ mod detection;
 mod stats;
 
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
+use clap::Parser;
 use tokio::sync::mpsc;
 
 use crate::alert::Alert;
 use crate::capture::{CaptureConfig, ParsedPacket, Sniffer, TransportHeader, start_capture};
 use crate::db::AlertStore;
-use crate::detection::DetectorState;
+use crate::detection::{DetectionThresholds, DetectorState};
 use crate::stats::Stats;
 
 /// Bounded queue between capture and detection. A full queue drops the newest packet and bumps
 /// `packets_dropped_queue_full`, keeping memory bounded and the loss visible.
 const PACKET_QUEUE_CAPACITY: usize = 256;
 
+/// Stomper: a lightweight network intrusion detection tool.
+#[derive(Parser)]
+struct Cli {
+    /// How many distinct destinations from one source, within `scan-interval-secs`, count as a
+    /// port scan.
+    #[arg(long, default_value_t = 64)]
+    scan_threshold: usize,
+
+    /// Time window, in seconds, within which a single source's destinations count toward a port
+    /// scan.
+    #[arg(long, default_value_t = 10)]
+    scan_interval_secs: u64,
+
+    /// How many bare SYNs to one destination, within `syn-flood-interval-secs`, count as a SYN
+    /// flood.
+    #[arg(long, default_value_t = 256)]
+    syn_flood_threshold: usize,
+
+    /// Time window, in seconds, within which SYNs to one destination count toward a SYN flood.
+    #[arg(long, default_value_t = 1)]
+    syn_flood_interval_secs: u64,
+}
+
+impl Cli {
+    fn thresholds(&self) -> DetectionThresholds {
+        DetectionThresholds {
+            max_scan_interval: Duration::from_secs(self.scan_interval_secs),
+            scan_packet_count_threshold: self.scan_threshold,
+            syn_flood_interval: Duration::from_secs(self.syn_flood_interval_secs),
+            syn_flood_packet_count_threshold: self.syn_flood_threshold,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
     let devices = Sniffer::list_interfaces()?;
     let Some(device) = devices
         .iter()
@@ -67,7 +104,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let detection_task = tokio::spawn(run_detection(packet_rx, store, Arc::clone(&stats)));
+    let detection_task = tokio::spawn(run_detection(
+        packet_rx,
+        store,
+        Arc::clone(&stats),
+        cli.thresholds(),
+    ));
 
     println!("  Press Ctrl-C to stop");
     println!();
@@ -94,8 +136,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Because detection is stateful (scan/flood windows), this task must process packets in order,
 /// so it is the only consumer of the queue. Capture is a separate task feeding this one, which
 /// decouples packet loss (a full queue drops the newest packet) from detection latency.
-async fn run_detection(mut rx: mpsc::Receiver<ParsedPacket>, store: AlertStore, stats: Arc<Stats>) {
-    let mut detector = DetectorState::default();
+async fn run_detection(
+    mut rx: mpsc::Receiver<ParsedPacket>,
+    store: AlertStore,
+    stats: Arc<Stats>,
+    thresholds: DetectionThresholds,
+) {
+    let mut detector = DetectorState::new(thresholds);
     let mut count = 0u64;
 
     while let Some(packet) = rx.recv().await {
@@ -265,20 +312,31 @@ fn icmp_desc(typ: u8, code: u8) -> String {
 /// detection criteria and assert that it triggers each detector.
 #[cfg(test)]
 mod replay_tests {
-    use crate::{
-        capture::parser,
-        detection::{
-            Activity, DetectorState, port_scan::SCAN_PACKET_COUNT_THRESHOLD,
-            syn_flood::SYN_FLOOD_PACKET_COUNT_THRESHOLD,
-        },
-    };
+    use crate::capture::parser;
+    use crate::detection::{Activity, DetectionThresholds, DetectorState};
     use pcap::{Capture, Offline};
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::time::Duration;
+
+    // `test.pcap` was captured against these specific thresholds, so they're pinned here.
+    const TEST_SCAN_INTERVAL: Duration = Duration::from_secs(10);
+    const TEST_SCAN_THRESHOLD: usize = 64;
+    const TEST_SYN_FLOOD_INTERVAL: Duration = Duration::from_secs(1);
+    const TEST_SYN_FLOOD_THRESHOLD: usize = 256;
+
+    fn test_thresholds() -> DetectionThresholds {
+        DetectionThresholds {
+            max_scan_interval: TEST_SCAN_INTERVAL,
+            scan_packet_count_threshold: TEST_SCAN_THRESHOLD,
+            syn_flood_interval: TEST_SYN_FLOOD_INTERVAL,
+            syn_flood_packet_count_threshold: TEST_SYN_FLOOD_THRESHOLD,
+        }
+    }
 
     /// Generate a list of detected activity from a replayed capture.
     fn replay(mut cap: Capture<Offline>) -> Vec<Activity> {
         let link_type = cap.get_datalink();
-        let mut detector = DetectorState::default();
+        let mut detector = DetectorState::new(test_thresholds());
         let mut activity = Vec::new();
 
         loop {
@@ -324,7 +382,7 @@ mod replay_tests {
                 src, destinations, ..
             } => {
                 assert_eq!(*src, Ipv4Addr::new(203, 0, 113, 50));
-                assert_eq!(*destinations, SCAN_PACKET_COUNT_THRESHOLD);
+                assert_eq!(*destinations, TEST_SCAN_THRESHOLD);
             }
             _ => unreachable!(),
         }
@@ -339,7 +397,7 @@ mod replay_tests {
                     *dst,
                     SocketAddr::new(Ipv4Addr::new(192, 168, 1, 20).into(), 80)
                 );
-                assert_eq!(*syn_count, SYN_FLOOD_PACKET_COUNT_THRESHOLD);
+                assert_eq!(*syn_count, TEST_SYN_FLOOD_THRESHOLD);
             }
             _ => unreachable!(),
         }

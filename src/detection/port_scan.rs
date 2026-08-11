@@ -9,27 +9,32 @@ use crate::{
     detection::{Activity, evidence_sample, src_dst_ip},
 };
 
-/// Port scan detection measures distinct packet destinations within a time frame. This constant
-/// specifies the interval within which a scan will be considered to have occurred.
-pub const MAX_SCAN_INTERVAL: Duration = Duration::from_secs(10);
-/// How many distinct destinations need to be logged from the same source in order to consider the
-/// activity a port scan.
-pub const SCAN_PACKET_COUNT_THRESHOLD: usize = 64;
-
-#[derive(Default)]
 pub struct SingleSourceScanState {
+    /// Interval within which a scan will be considered to have occurred.
+    max_scan_interval: Duration,
+    /// How many distinct destinations need to be logged from the same source in order to consider
+    /// the activity a port scan.
+    scan_packet_count_threshold: usize,
     /// Maps source IPs to the destination socket addresses they've sent packets to, as well as the
     /// timestamp for the latest packet. We can remove entries from the inner hashmap when the
-    /// latest packet has aged out according to [`MAX_SCAN_INTERVAL`].
+    /// latest packet has aged out according to `max_scan_interval`.
     history: HashMap<IpAddr, HashMap<SocketAddr, SystemTime>>,
 }
 
 impl SingleSourceScanState {
+    pub fn new(max_scan_interval: Duration, scan_packet_count_threshold: usize) -> Self {
+        Self {
+            max_scan_interval,
+            scan_packet_count_threshold,
+            history: HashMap::new(),
+        }
+    }
+
     pub fn log_packet(&mut self, packet: &ParsedPacket) -> Option<Activity> {
         // Remove outdated packets from history
         let now = packet.timestamp;
         self.history.retain(|_, inner| {
-            inner.retain(|_, ts| *ts + MAX_SCAN_INTERVAL >= now);
+            inner.retain(|_, ts| *ts + self.max_scan_interval >= now);
             !inner.is_empty()
         });
 
@@ -46,7 +51,7 @@ impl SingleSourceScanState {
 
         // Run detection rule, only need to check most recent source (other runs will test other
         // sources). Clear history on detection so we don't flood with scan detections.
-        if source_entry.len() < SCAN_PACKET_COUNT_THRESHOLD {
+        if source_entry.len() < self.scan_packet_count_threshold {
             return None;
         }
         let destinations = source_entry.len();
@@ -70,6 +75,13 @@ mod tests {
     const SCANNER: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 50);
     const TARGET: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 1);
 
+    const TEST_MAX_SCAN_INTERVAL: Duration = Duration::from_secs(10);
+    const TEST_SCAN_PACKET_COUNT_THRESHOLD: usize = 64;
+
+    fn test_state() -> SingleSourceScanState {
+        SingleSourceScanState::new(TEST_MAX_SCAN_INTERVAL, TEST_SCAN_PACKET_COUNT_THRESHOLD)
+    }
+
     /// One connection attempt from `src` to `TARGET:port`, at `timestamp`.
     fn probe(timestamp: SystemTime, src: Ipv4Addr, port: u16) -> ParsedPacket {
         tcp_packet(
@@ -86,10 +98,10 @@ mod tests {
 
     #[test]
     fn scan_below_threshold_is_not_detected() {
-        let mut detector = SingleSourceScanState::default();
+        let mut detector = test_state();
         let now = test_time();
 
-        for port in 0..(SCAN_PACKET_COUNT_THRESHOLD - 1) {
+        for port in 0..(TEST_SCAN_PACKET_COUNT_THRESHOLD - 1) {
             let packet = probe(now, SCANNER, port as u16);
             assert!(detector.log_packet(&packet).is_none());
         }
@@ -97,11 +109,11 @@ mod tests {
 
     #[test]
     fn scan_is_detected_at_the_threshold_with_capped_port_evidence() {
-        let mut detector = SingleSourceScanState::default();
+        let mut detector = test_state();
         let now = test_time();
         let mut detected = None;
 
-        for port in 0..SCAN_PACKET_COUNT_THRESHOLD {
+        for port in 0..TEST_SCAN_PACKET_COUNT_THRESHOLD {
             detected = detector.log_packet(&probe(now, SCANNER, port as u16));
         }
 
@@ -114,7 +126,7 @@ mod tests {
             panic!("expected a port scan detection");
         };
         assert_eq!(src, IpAddr::V4(SCANNER));
-        assert_eq!(destinations, SCAN_PACKET_COUNT_THRESHOLD);
+        assert_eq!(destinations, TEST_SCAN_PACKET_COUNT_THRESHOLD);
         assert_eq!(ports.len(), MAX_EVIDENCE_ITEMS);
         assert!(ports.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(detector.history.is_empty());
@@ -123,10 +135,10 @@ mod tests {
     /// Repeating one destination is a retry, not reconnaissance.
     #[test]
     fn repeated_probes_to_one_destination_are_not_a_scan() {
-        let mut detector = SingleSourceScanState::default();
+        let mut detector = test_state();
         let now = test_time();
 
-        for i in 0..(SCAN_PACKET_COUNT_THRESHOLD * 2) {
+        for i in 0..(TEST_SCAN_PACKET_COUNT_THRESHOLD * 2) {
             let packet = probe(now + Duration::from_millis(i as u64), SCANNER, 443);
             assert!(detector.log_packet(&packet).is_none());
         }
@@ -134,10 +146,10 @@ mod tests {
 
     #[test]
     fn destinations_from_different_sources_do_not_combine() {
-        let mut detector = SingleSourceScanState::default();
+        let mut detector = test_state();
         let now = test_time();
 
-        for port in 0..SCAN_PACKET_COUNT_THRESHOLD {
+        for port in 0..TEST_SCAN_PACKET_COUNT_THRESHOLD {
             let src = Ipv4Addr::new(192, 168, 1, 50 + (port % 2) as u8);
             assert!(detector.log_packet(&probe(now, src, port as u16)).is_none());
         }
@@ -145,9 +157,9 @@ mod tests {
 
     #[test]
     fn old_destinations_expire() {
-        let mut detector = SingleSourceScanState::default();
+        let mut detector = test_state();
         let base = test_time();
-        let half = SCAN_PACKET_COUNT_THRESHOLD / 2;
+        let half = TEST_SCAN_PACKET_COUNT_THRESHOLD / 2;
 
         for port in 0..half {
             assert!(
@@ -158,8 +170,8 @@ mod tests {
         }
 
         // Past the window, so the first batch can no longer contribute to a detection.
-        let later = base + MAX_SCAN_INTERVAL + Duration::from_millis(1);
-        for port in half..SCAN_PACKET_COUNT_THRESHOLD {
+        let later = base + TEST_MAX_SCAN_INTERVAL + Duration::from_millis(1);
+        for port in half..TEST_SCAN_PACKET_COUNT_THRESHOLD {
             assert!(
                 detector
                     .log_packet(&probe(later, SCANNER, port as u16))

@@ -5,16 +5,42 @@ use port_scan::SingleSourceScanState;
 use syn_flood::SynFloodState;
 
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 use crate::capture::ParsedPacket;
 
-#[derive(Default)]
+/// Configurable thresholds for every detector.
+pub struct DetectionThresholds {
+    /// Interval within which a scan will be considered to have occurred.
+    pub max_scan_interval: Duration,
+    /// How many distinct destinations need to be logged from the same source in order to consider
+    /// the activity a port scan.
+    pub scan_packet_count_threshold: usize,
+    /// Time interval within which a large number of SYNs is considered an attack.
+    pub syn_flood_interval: Duration,
+    /// Amount of SYNs considered a large number for the time interval.
+    pub syn_flood_packet_count_threshold: usize,
+}
+
 pub struct DetectorState {
     single_source_scan: SingleSourceScanState,
     syn_flood: SynFloodState,
 }
 
 impl DetectorState {
+    pub fn new(thresholds: DetectionThresholds) -> Self {
+        Self {
+            single_source_scan: SingleSourceScanState::new(
+                thresholds.max_scan_interval,
+                thresholds.scan_packet_count_threshold,
+            ),
+            syn_flood: SynFloodState::new(
+                thresholds.syn_flood_interval,
+                thresholds.syn_flood_packet_count_threshold,
+            ),
+        }
+    }
+
     pub fn log_packet(&mut self, packet: &ParsedPacket) -> Vec<Activity> {
         self.single_source_scan
             .log_packet(packet)
