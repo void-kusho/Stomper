@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 axum = "0.8"
+clap = { version = "4", features = ["derive"] }
 pcap = "1"
 pnet_packet = "0.34"
 serde = { version = "1", features = ["derive"] }
